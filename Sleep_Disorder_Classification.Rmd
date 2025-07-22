@@ -1,0 +1,1008 @@
+---
+title: "Sleep_Disorder_Classification"
+author: "Buse Uzun"
+date: "2025-07-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+
+library(dplyr)
+library(tidyverse)
+library(missMethods)
+library(corrplot)
+library(GGally)
+library(naniar)
+library(VIM)
+library(mice)
+library(car)
+library(caret)
+library(e1071)
+library(glmnet)
+library(pROC)
+```
+
+# Aim of the project
+
+The aim of this project is to see how daily habits of participants changes their sleep healths. The dataset contains variables such as gender, age, occupation, sleep duration, quality of sleep etc. The dependent variable is chosen as sleep disorder variable which shows whether the participant has insomnia, sleep apnea or none. 
+
+What is insomnia and sleep apnea?
+
+Insomnia is having trouble to fall asleep or keep sleeping.
+Sleep apnea is having breathing problems while sleeping where it repeatedly stops and begins.
+
+## Source of the data: 
+This dataset is taken from kaggle: https://www.kaggle.com/datasets/uom190346a/sleep-health-and-lifestyle-dataset/data
+
+# Creating Missing Values
+
+As the dataset does not contain missing values, we need to generate missing completely at random (MCAR) variables. 
+
+```{r}
+original_sleep = read.csv("Sleep_health_and_lifestyle_dataset.csv")
+```
+
+```{r}
+set.seed(412)
+
+#create 10 percent missingness (MCAR)
+#sleep_mcar = delete_MCAR(ds = original_sleep, p = 0.1)
+
+#colSums(is.na(sleep_mcar))
+
+#write.csv(sleep_mcar, 'sleep_health_missing.csv', row.names = FALSE)
+```
+
+<!-- ```{r} -->
+<!-- sum(is.na(sleep_mcar)) -->
+<!-- original_sleep[duplicated(original_sleep), ] #no duplicates in the data before removing person ID -->
+<!-- ``` -->
+
+# Importing the Data
+ 
+
+```{r}
+sleep <- read.csv("sleep_health_missing.csv")
+```
+
+```{r}
+sum(is.na(sleep))
+head(sleep)
+dim(sleep)
+```
+
+From the output of the dimension, we can see that the dataset has 374 observations for 13 variables.
+
+# Data Cleaning and Tidying
+
+Before moving forward, column names can be altered for ease of use.
+
+```{r}
+colnames(sleep) <-c("Person_ID","Gender","Age","Occupation","Sleep_Duration","Sleep_Quality","Physical_Activity_Level","Stress_Level","BMI_Category","Blood_Pressure","Heart_Rate","Daily_Steps","Sleep_Disorder")
+
+colnames(sleep)
+```
+
+Persont_ID: Given IDs to identify participants
+
+Age: Age of the participants
+
+Gender: Female, Male
+
+Occupation: Occupation of the participant
+
+Sleep_Duration: Sleep hours of participants per day
+
+Sleep_Quality: Subjective rating of sleep quality (1-10 scale)
+
+Physical_Activity_Level: The amount of physical activity of participants in minutes
+
+Stress_Level: Subjective stress level of participants (1-10 scale)
+
+BMI_Category: BMI category of participants (Underweight, Normal, Overweight)
+
+Blood_Pressure: Blood pressure of the participants. Computed by dividing systolic pressure by diastolic pressure
+
+Heart_Rate: Resting heart rate of the participants in beats per minute (bpm)
+
+Daily_Steps: The number of daily steps of participants
+
+Sleep_Disorder: Shows whether the participant has insomnia, sleep apnea ar none
+
+Now, we can check if the variables are formatted correctly. Classes of variables can be checked as following,
+
+```{r}
+str(sleep)
+summary(sleep)
+```
+
+Variables such as Gender, BMI_Category, Sleep_Disorder, and Occupation should be transformed to factors (Sleep quality and stress level should be factors too, but they will be handled in the following part.). Person_ID variable is unnecessary so it is removed.
+
+```{r}
+sleep$Gender <- as.factor(sleep$Gender)
+#sleep$Sleep_Quality <- as.factor(sleep$Sleep_Quality)
+#sleep$Stress_Level <- as.factor(sleep$Stress_Level)
+sleep$BMI_Category <- as.factor(sleep$BMI_Category)
+sleep$Sleep_Disorder <- as.factor(sleep$Sleep_Disorder)
+sleep$Occupation <- as.factor(sleep$Occupation)
+sleep$Person_ID <- NULL
+```
+
+```{r}
+str(sleep)
+```
+```{r}
+summary(sleep)
+```
+
+Some of the variables need to be altered further before doing any exploration or analysis. First, BMI category should be submerged to Normal Weight and Overweight. Sleep quality and stress level can be categorized further to show qualities; they are actually showing scores between 1-10, but they will be categorized in the following part as there are many missing scores. Sleep disorder can be submerged to binary by classifying not having sleep disorders as 0, and having sleep disorders as 1. Also, the blood pressure column is taken as character because it is stored as "Systolic Blood Pressure/Diastolic Blood Pressure".
+
+**BMI Category:**
+
+Here, the categories are merged to normal weight and overveight.
+
+```{r}
+sleep <- sleep %>%
+  mutate(BMI_Category = case_when(
+    BMI_Category %in% c("Normal", "Normal Weight") ~ "Normal Weight",
+    BMI_Category %in% c("Overweight", "Obese") ~ "Overweight",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(BMI_Category = factor(BMI_Category, levels = c("Normal Weight", "Overweight")))
+
+```
+
+**Sleep Quality:**
+
+```{r}
+sleep <- sleep %>%
+  mutate(Sleep_Quality = case_when(
+    Sleep_Quality < 5 ~ "Low",
+    Sleep_Quality <= 6 ~ "Moderate",
+    Sleep_Quality <= 8 ~ "Good",
+    Sleep_Quality > 8 ~ "Very Good",
+    TRUE ~ NA_character_
+  )) %>% 
+  mutate(Sleep_Quality = factor(Sleep_Quality, levels = c("Low", "Moderate", "Good","Very Good")))
+```
+
+Since generally used Pitsburg Sleep Quality Index ranges from 0-21 and this dataset ranges from 1-10, it was not possible to use it. A 4-level classification informed by sleep health literature was adapted.
+
+*Reference:*
+
+Hirshkowitz, M., et al. (2015). National Sleep Foundation’s Sleep Time Duration Recommendations: Methodology and Results Summary. Sleep Health.
+
+**Stress Level:**
+
+Stress level shows the scores from 1-10, it was modified to 3 categories which are low for 1-3, moderate for 4-6, and high for 7-10.
+
+```{r}
+sleep <- sleep %>%
+  mutate(Stress_Level = case_when(
+    Stress_Level <= 3 ~ "Low",
+    Stress_Level <= 6 ~ "Moderate",
+    Stress_Level >= 7 ~ "High",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(Stress_Level = factor(Stress_Level, levels = c("Low", "Moderate", "High")))
+```
+
+*Reference:*
+
+Cohen, S., Kamarck, T., & Mermelstein, R. (1983). A global measure of perceived stress. Journal of Health and Social Behavior, 24(4), 385–396.
+
+**Sleep Disorder:**
+
+Sleep disorder was merged into 2 categories to represent no sleep disorders and sleep disorders.
+
+```{r}
+sleep <- sleep %>%
+  mutate(Sleep_Disorder = case_when(
+    Sleep_Disorder %in% c("Insomnia", "Sleep Apnea") ~ "Yes",
+    Sleep_Disorder == "None" ~ "No",
+    TRUE ~ NA_character_
+  ))
+
+sleep$Sleep_Disorder <- factor(sleep$Sleep_Disorder, levels = c("No", "Yes"))
+```
+
+**Blood Pressure:**
+
+First I separated the blood pressure to systolic and diastolic columns and then categorized them based on American College of Cardiology and the American Heart Association's 2017 Guideline for Blood Pressure in Adults based on stages.
+
+Low: Systolic<90, Diastolic<60 (no observation)
+
+Moderate: Systolic<129, Diastolic<80 (I combined normal and elevated for simplification))
+
+High Stage 1: 130<Systolic<139 or 80<Diastolic<89
+
+High Stage 2: Systolic>=140 or Diastolic>=90
+
+Hypertensive Crisis: Systolic>=180 and/or Diastolic>=120 (no observation)
+
+```{r}
+sleep <- sleep %>%
+  separate(Blood_Pressure, into = c("Systolic", "Diastolic"), sep = "/", convert = TRUE) %>%
+    mutate(Blood_Pressure_C = case_when(
+    Systolic < 90 | Diastolic < 60 ~ "Low",
+    Systolic < 130 & Diastolic < 80 ~ "Moderate",
+    (Systolic >= 130 & Systolic <= 139) | (Diastolic >= 80 & Diastolic <= 89) ~ "High Stage 1",
+    (Systolic >= 140 & Systolic < 180) | (Diastolic >= 90 & Diastolic < 120) ~ "High Stage 2",
+    Systolic >= 180 | Diastolic >= 120 ~ "Hypertensive Crisis",
+    TRUE ~ NA_character_
+  ))
+```
+
+```{r}
+sleep$Blood_Pressure_C <- as.factor(sleep$Blood_Pressure_C)
+sleep$Systolic <- NULL
+sleep$Diastolic <- NULL
+```
+
+*Reference:*
+
+2017 ACC/AHA/AAPA/ABC/ACPM/AGS/APhA/ASH/ASPC/NMA/PCNA Guideline for the Prevention, Detection, Evaluation, and Management of High Blood Pressure in Adults
+Published by: American College of Cardiology (ACC) & American Heart Association (AHA)
+Journal: Hypertension, Volume 71, Issue 6, June 2018
+DOI: 10.1161/HYP.0000000000000065
+
+Now, summary and standard deviations can be checked:
+
+```{r}
+summary(sleep)
+```
+
+```{r, echo=FALSE}
+cat("standard deviation of Age:", sd(sleep$Age, na.rm = T), "\n")
+cat("standard deviation of Sleep Duration:", sd(sleep$Sleep_Duration, na.rm = T), "\n")
+cat("standard deviation of Physical Activity Level:", sd(sleep$Physical_Activity_Level, na.rm = T), "\n")
+cat("standard deviation of Heart Rate:", sd(sleep$Heart_Rate, na.rm = T), "\n")
+cat("standard deviation of Daily Steps:", sd(sleep$Daily_Steps, na.rm = T), "\n")
+
+```
+
+From the summary statistics we can investigate the variables further. 
+It can be observed that there are 164 female, 173 male and 37 NA values.
+
+Minimum age of the participants is 27 while the maximum age is 59, mean age is 42.27 and the standard deviation is 8.78.
+
+There are 11 different occupations of participants such as nurse, doctor, engineer etc.
+
+Sleep duration of the participants ranges between 5.8 to 8.5 hours, average sleeping hour is 7.13, and the median is 7.2. The closeness of the mean and the median can be an indicator of normal distribution of the variable. Also, its standard deviation is 0.8.
+
+Sleep quality of the participants are mostly good with 166 people, it is followed by moderate sleep quality with 104 people, very good sleep quality with 62 people, and lastly low sleep quality with 5 people.
+
+Lowest engaged physical activity is 30 minutes, and the greatest is 90 minutes. Mean of the physical activity level is 59.49 minutes and the standard deviation is 20.95.
+
+The most chosen stress level by participants was moderate with 171 people, it was followed by high level with 103, and low level with 63 people.
+
+When BMI categories are inspected, 194 were normal weight and 143 were overweight.
+<!-- #Systolic and diastolic variables were for blood pressures. While systolic blood pressure ranges from 115 to 142, diastolic blood pressure ranges from 75 to #95. -->
+
+The blood pressure categories are either high stage 1 or 2 and moderate. Most of the participants fall into high stage 1 category.
+
+Minimum heart rate of attendants is 65 and the maximum is 86, average heart rate is 70.23 and the standard deviation is 4.18.
+
+Daily steps variable ranges between 3000 to 10000 with the median of 7000 and the average of 6821. The standard deviation of daily steps is 1619.776
+
+Finally, the sleep disorder column which is the dependent variable has 192 people who do not have a sleep disorder and 145 people who do have a sleep disorder (either insomnia or sleep apnea).
+
+Each variable had 37 NA values.
+
+# Exploratory Data Analysis
+
+## Research Questions:
+
+#### Q1: How are the ages of participants distributed?
+
+```{r}
+ggplot(sleep, aes(x = Age)) +
+  geom_density(fill = "steelblue", alpha = 0.6) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30,fill = "steelblue", color = "black", alpha = 0.7) +
+  labs(
+    title = "Distribution of Age",
+    x = "Age",
+    y = "Frequency"
+  ) +
+  scale_x_continuous(breaks = seq(30, 70, by =5))+
+  theme_minimal()
+```
+
+From the histogram it is seen that the ages of the participants are not normally distributed or symmetrical. There is a peak around the age of 44 which means there is a large proportion of people at this age. It can also be observed that the ages are distributed around 25 to 60.
+
+
+#### Q2: How much missing data is there?
+
+```{r}
+sum(is.na(sleep))
+```
+
+There are 444 missing values in the data in total, these will be handled later on.
+
+
+#### Q3: What are the relationship between numerical values in the data?
+
+```{r}
+numeric_variables <- sleep[, sapply(sleep, is.numeric)]
+colnames(numeric_variables) <- c("Age", "Sleep Duration", "Physical Activity","Heart Rate", "Daily Steps")
+correlation_matrix <- cor(numeric_variables, use = "na.or.complete")
+
+corrplot(correlation_matrix, method = "color", 
+         addCoef.col = "black", 
+         tl.col = "black",     
+         tl.srt = 45,
+         number.cex = 0.8,
+         main = "Correlation Matrix of Numerical Variables")
+```
+
+
+<!-- # ```{r} -->
+<!-- # # Create scatter plot matrix -->
+<!-- # ggpairs(numeric_variables) -->
+<!-- # ``` -->
+From the correlation plot it is seen that the correlation between physical activity and daily steps have a quite strong positive correlation with 0.78. Heart rate and age seems have moderate negative correlation as well as sleep duration and heart rate. Sleep duration and age also have 0.35 correlation which can be considered as moderate positive. Multicollinearity should be observed later on.
+
+#### Q4: What is the relationship between sleep disorders and physical activity level?
+
+```{r}
+ggplot(sleep, aes(x = Sleep_Disorder, y = Physical_Activity_Level, fill = Sleep_Disorder)) +
+  geom_violin(trim = FALSE, alpha = 0.7) +
+  stat_summary(fun = median, geom = "point", size = 2, color = "black") +
+  labs(title = "Violin Plot of Daily Physical Activity Amount by Sleep Disorders",
+       x = "Sleep Disorder",
+       y = "Daily Physical Activity Amount (mins)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+
+From the violin plots it can be observed that both not having a sleep disorder and having a sleep disorder with respect to the number of minutes participants engaged in physical activities is not normal. Attendants who has a sleep disorder has a lower median in physical activity amount around 45 minutes. The median of physical activity is 60 minutes for participants who do not have a sleep disorder. NA values in sleep disorder seems to have unimodal distribution.
+
+#### Q5:What is the relationship between BMI categories and stress levels of attendants?
+
+```{r}
+library(ggmosaic)
+ggplot(sleep) +
+  geom_mosaic(aes(weight = 1, x = product(BMI_Category), fill = Stress_Level)) +
+  labs(title = "Mosaic Plot of BMI Category vs Stress Level",
+       x = "BMI Category",
+       y = "Stress Level") +
+  theme_minimal()
+```
+
+
+From the mosaic plot it is seen that more overweight individuals tend to have high stress level than normal weighted ones. Moderate stress type seems to be the opposite, more normal weighted people are in this category than overweight ones.
+
+#### Q6: How does the relationship of physical activity level, heart rate, sleep disorder, and stress level look like?
+
+```{r}
+ggplot(sleep, aes(x = Physical_Activity_Level, y = Heart_Rate, color = Sleep_Disorder, size = Stress_Level)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Bubble Plot of Physical Activity Level vs Heart Rate (Sized by Stress Level)",
+       x = "Daily Physical Activity (mins)",
+       y = "Heart Rate",
+       size = "Stress Level",
+       color = "Sleep Disorder") +
+  theme_minimal()
+```
+
+
+From the bubble plot, the size of the bubbles shows stress levels, it can be observed that as the heart rate increases, stress levels and having a sleep disorder subtly increase as well. It seems that people with lower daily physical activity has sleep disorders and their heart rate seems to be on the higher side. It does not look like there is a linear relationship between heart rate and daily physical activity.
+
+#### Q7: Is there any outliers in heart rates of participants?
+
+```{r}
+ggplot(sleep, aes(y = Heart_Rate)) +
+  geom_boxplot(fill = "steelblue") +
+  labs(title = "Boxplot of BMI", y = "BMI") +
+  theme_minimal()
+```
+
+
+There does seem to be some outliers in heart rate variable, its distribution looks a bit symmetric.
+
+#### Q8: How does the relationship of daily steps and sleep duration look like based on gender?
+
+
+```{r}
+ggplot(sleep, aes(x = Daily_Steps, y = Sleep_Duration)) +
+  facet_wrap(~ Gender) +
+  geom_point(color = "darkblue", alpha=0.5) +
+  geom_jitter(width=0.9, height=0.6)+
+  labs(title = "Trellis Plot: Daily Steps vs Sleep Duration by Gender",
+       x = "Daily Steps",
+       y = "Sleep Duration") 
+  
+```
+
+From the faceted plots with respect to gender, there does not seem to be any relationship between daily steps and sleep duration with respect to gender. There might be very little positive correlation for females.
+
+#### Q9: What is the relationship between occupation and gender?
+
+```{r}
+ggplot(sleep, aes(x = Occupation, fill = Gender)) +
+  geom_bar(position = position_dodge()) +
+  geom_text(stat = "count", aes(label = after_stat(count)),
+            position = position_dodge(width = 0.9), vjust = -0.3) +
+  scale_fill_manual(values = c("darkorange", "steelblue")) +
+  labs(title = "Dodged Bar Plot: Occupation by Gender",
+       x = "Occupation",
+       y = "Count",
+       fill = "Gender") +
+  scale_x_discrete(guide = guide_axis(angle = 30))+
+  theme_minimal()
+```
+
+From the dodged bar plot, we can see that occupations like manager, nurse, and scientist only have female participants while lawyer, sales person and software engineer only have male participants. The most missingness is seen in nurses.
+
+##########################################
+
+<!-- Below plot shows the overall distributions and relations of the data: -->
+
+<!-- ```{r} -->
+<!-- c=ggpairs(sleep,title="Correlogram with ggpairs()",upper = list(continuous = wrap("cor", size = 2)),lower = list(continuous = wrap("points",  size = 0.5))) -->
+<!-- c + theme(axis.text = element_text(size = 5), -->
+<!--           strip.text.x = element_text(size = 4),  -->
+<!--           strip.text.y = element_text(size = 4))  -->
+
+<!-- ``` -->
+
+# Exploration of Missingness Mechanism
+
+First, the missingness pattern should be investigated.
+
+```{r}
+# Check where missing values are
+miss_var_summary(sleep)
+```
+
+From the above table it can be seen that each variable has almost 10% missingness.
+
+Missingness can be visualized in a few ways.
+
+```{r}
+# Visualize missingness
+vis_miss(sleep) +
+  labs(title = "Missing Values Heatmap")
+```
+
+From investigating the structure of the missingness there does not seem to be any patterns since the black parts which shows missing values are scattered randomly across present values. In this case missing completely at random (MCAR) can be suggested, but there is still possibility of mechanism being missing at random (MAR) if the missingness depends on another variable.
+
+There are statistical tests for checking if the data has MCAR.
+
+```{r}
+library(MissMech)
+sleep_numeric <- sleep[, sapply(sleep, is.numeric)]
+
+TestMCARNormality(sleep_numeric)
+```
+
+Hawkins rejects MCAR but it assumes normality, on the other hand non-parametric test fails to reject MCAR. As non-parametric test does not assume normality which the dataset violates, it can be concluded that the dataset has MCAR pattern.
+
+```{r}
+gg_miss_var(sleep, facet=Sleep_Disorder)
+
+```
+
+When missing value pattern is considered with respect to having sleep disorder, it seems that there are no dependency on missingness across groups. This suggests MCAR once more as having a sleep disorder or not does not influence the number of missingness.
+
+```{r}
+gg_miss_fct(x = sleep, fct = BMI_Category)
+```
+ 
+There does not seem to be a pattern for BMI categories as well.
+
+Now, as it is certain that the missingness comes from MCAR they can be imputed. Non-missing part of the data will be used to impute the missing part of the data.
+
+```{r}
+init = mice(sleep, maxit = 0, printFlag = FALSE)
+default_methods = init$method
+default_predMat = init$predictorMatrix
+
+#default methods
+print(default_methods)
+```
+
+From above the default methods for each variable can be seen.
+
+```{r}
+sleep_imp = mice(sleep, m = 5, maxit = 3, seed = 500)
+```
+
+```{r}
+summary(sleep_imp)
+```
+
+```{r}
+sleep_comp = complete(sleep_imp, 1)
+
+sum(is.na(sleep_comp))
+```
+
+There are no longer missing values in our dataset.
+
+```{r}
+summary(sleep)
+```
+
+```{r}
+summary(sleep_comp)
+```
+
+When we compare imputed and raw data, there can be seen some differences. Still there are more male participants than female participants but as expected both has increased. The range of age did not change but mean is no longer 42.27, it became 42.22. When occupation is observed, number of nurses increased to 76, number of of doctors increased to 70 etc. The mean of sleep duration changed from 7.128 to 7.132, the average slightly increased but range did not differ. The order of sleep quality levels, stress levels, BMI categories, and blood pressure categories did not change. Physical activity level did not change at all, there is a 0.01 increase in mean. The average of heart rate changed from 70.23 to 70.21. The mean of daily steps were 6821, it decreased to 67776. Lastly, the number of participants who do not have a sleep disease increased to 217 from 192, and who have a sleep disease increased to 157 from 145.
+
+Hence, neither the ranges nor medians changed in continuous variables.
+
+Original Sleep_Quality proportions:
+```{r}
+prop.table(table(sleep[["Sleep_Quality"]]))
+```
+
+Imputed Sleep_Quality proportions:
+```{r}
+prop.table(table(sleep_comp[["Sleep_Quality"]]))
+```
+
+It can be seen that the proportion varied very subtly. While proportion of good and very good sleep quality increased very little, low and moderate decreased.
+
+```{r}
+for (var in names(sleep)[9]) { #can be used for more than 1 variable, thus I used for loop just in case
+  df <- data.frame(
+    value = c(sleep[[var]], sleep_comp[[var]]),
+    source = rep(c("Original", "Imputed"), each = nrow(sleep))
+  )
+  
+  p <- ggplot(df, aes(x = value, fill = source)) +
+    geom_density(alpha = 0.5) +
+    ggtitle(paste("Kernel Density Plot -", var))
+  
+  print(p)
+}
+
+```
+
+When kernel density plot of heart rate is observed it is seen that imputed and original data overlays, which is good. Same results were obtained from other continuous variables. 
+
+# Feature Engineering and Data Manipulation
+
+In the beginning of the project some of the variables were altered to enable EDA such as sleep quality, stress level, BMI category, blood pressure and sleep disorder. Sleep quality was a score between 1-10, it was modified to be Low-Moderate-Good-Very Good as there were empty scores. Stress level was also a score between 1-10, it was altered to be Low-Moderate-High. BMI categories were problematic as it contained normal, normal weight, overweight and obese; normal&normal weight and overweight&obese classes were merged. Sleep disorder was modified to a binary factor variable to show not having a sleep disorder and having a sleep disorder (insomnia or sleep apnea). Blood pressure variable was a character which showed "systolic pressure/diastolic pressure", it was divided into two columns and separated into blood pressure categories.
+
+# Confirmatory Data Analysis
+
+As there are many questions, some of them are chosen to analyse further.
+
+#### Q1: How are the sleep disorder distributed?
+
+Let us check it the sleep disorder has normal distribution.
+
+```{r}
+chisquare_q1 <- chisq.test(table(sleep_comp$Sleep_Disorder))
+chisquare_q1$expected
+chisquare_q1
+```
+
+Since expected counts of chi square test are greater than 1 it can be used. Since the p-value is less than 0.05 we reject the null hypothesis which means that the sleep disorders variable is not normally distributed.
+
+#### Q2: How are the ages of participants distributed?
+
+Let us see if the age follows a normal distribution.
+
+```{r}
+shapiro.test(sleep_comp$Age)
+```
+
+Since the p-value of Shapiro-Wilk test is much less than 0.05, the null hypothesis is rejected which means data is not normally distributed. 
+
+Skewness and kurtosis can also be checked:
+
+```{r}
+skewness(sleep_comp$Age)
+kurtosis(sleep_comp$Age)
+```
+
+Skewness should be around 0 and kurtosis should be around -3 or 3. The skewness of age is good but kurtosis is far from -3. It still does not seem normal.
+
+#### Q5: What is the relationship between sleep disorders and physical activity level?
+
+First, we need to check the normality.
+
+```{r}
+by(sleep_comp$Physical_Activity_Level, sleep_comp$Sleep_Disorder, shapiro.test)
+```
+
+From the shapiro-wilk test we can see that normality is not satisfied. Non-parametric tests can be used in this case.
+
+Let us check the homoscedasticity anyways.
+
+```{r}
+leveneTest(Physical_Activity_Level ~ Sleep_Disorder, data = sleep_comp)
+```
+
+Since the p-value of Levene's test is greater than 0.05 the homoscedasticity of variance assumption is satisfied. 
+
+Wilcoxon Rank-Sum test can be used since the normality is not satisfied.
+
+```{r}
+wilcox.test(Physical_Activity_Level ~ Sleep_Disorder, data = sleep_comp)
+```
+
+When the output of Wilcoxon-Rank-Sum test is observed, the p-value is 0.046. Even though it is very close to 0.05, it is still a bit smaller so null hypothesis can be rejected. Hence, there is a significant difference in the physical activity levels in a day between having a sleep disorder or not. From the previous violin plot we've already seen that participants who have sleep disorders have lower median in physical activity amount in a day.
+
+#### Q6:What is the relationship between BMI categories and stress levels of attendants?
+
+Chi-Square test can be applied but assumptions should be checked as well.
+
+```{r}
+q6_table <- table(sleep_comp$BMI_Category, sleep_comp$Stress_Level)
+chisq_results <- chisq.test(q6_table)
+```
+```{r}
+chisq_results$expected
+```
+
+Since none of the expected counts are below 1 chi-square test is valid to use.
+
+```{r}
+chisq_results
+```
+
+From the p-value of the Chi-Sq test we reject the null hypothesis as p-value is less that 0.05. Therefore, there is a significant association between BMI categories and stress levels. This association was also seen in the EDA visualization as the mosaic plot showed that while more overweight participants have high stress level than normal weighted ones, it is the opposite for moderate stress type.
+
+<!-- #### Q9: How does the relationship of daily steps and sleep duration look like based on gender? -->
+
+<!-- Linear regression cannot be used since normality assumption was not satisfied. Different transformation techniques were tried but none satisfied normality. Therefore, robust linear regression can be used. -->
+
+<!-- ```{r} -->
+<!-- library(MASS) -->
+<!-- robust_model_q9 <- rlm(Sleep_Duration ~ Daily_Steps * Gender, data = sleep_comp) -->
+<!-- summary(robust_model_q9) -->
+
+<!-- ``` -->
+
+<!-- From the coefficients of the robust regression it is seen that when steps are taken as 0, nightly sleep duration for females is 9.51 hours. For each one unit increase in daily steps, sleeping duration decreases by 0.0003 hours for females which shows no difference at all. When daily steps are taken as 0, male participants sleep 4.68 hours less than females daily. For males, the effect of daily steps is 0.0003 hours increase on sleep duration for each step. Median of the model is close to zero which is great. -->
+
+<!-- #Q10: What is the relationship between occupation and gender? -->
+
+<!-- Chi-square test was not used as the expected count of the table values were below 1. Fisher's exact test was used instead. -->
+
+<!-- ```{r} -->
+<!-- q10_table <- table(sleep_comp$Gender, sleep_comp$Occupation) -->
+<!-- chisq_results_q10 <- chisq.test(table(sleep_comp$Gender, sleep_comp$Occupation), simulate.p.value = TRUE, B = 10000) -->
+
+<!-- ``` -->
+<!-- ```{r} -->
+<!-- chisq_results_q10$expected -->
+<!-- ``` -->
+
+<!-- Since none of the expected counts are below 1 chi-square test is not valid to use. -->
+
+<!-- ```{r} -->
+<!-- chisq_results_q10 -->
+<!-- ``` -->
+
+# MODELING
+
+## Train Test Split
+
+```{r}
+set.seed(412)
+
+sample_data = createDataPartition(sleep_comp$Sleep_Disorder, p = 0.8, list = FALSE)
+
+#training dataset
+train_sleep  = sleep_comp[sample_data, ]
+
+#testing dataset
+test_sleep = sleep_comp[-sample_data, ]
+```
+
+Check the frequency:
+```{r}
+table(train_sleep$Sleep_Disorder)
+prop.table(table(train_sleep$Sleep_Disorder))
+prop.table(table(test_sleep$Sleep_Disorder))
+```
+
+The same proportions are reserved with respect to the original data.
+
+<!-- #Cross-Validation -->
+
+<!-- K-Fold cross validation is used with k=10 folds. -->
+
+<!-- ```{r} -->
+<!-- control_sleep <- trainControl(method = "cv", number = 10) -->
+
+<!-- model_cv <- train( -->
+<!--   Sleep_Disorder ~ .,  -->
+<!--   data = train_sleep,  -->
+<!--   method = "glm",       -->
+<!--   trControl = control_sleep -->
+<!-- ) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- predictions <- predict(model_cv, newdata = test_sleep) -->
+
+<!-- # For classification -->
+<!-- confusionMatrix(predictions, test_sleep$Sleep_Disorder) -->
+
+<!-- # For regression -->
+<!-- postResample(predictions, test_sleep$Sleep_Disorder) -->
+<!-- ``` -->
+
+<!-- When accuracy is checked it is seen that 91% of the overall predictions are correct. Sensitivity is 95%, which shows correctly classified true cases. Specificity is the percentage of correctly classified negative cases, which is 87%. When no information rate is checked it is observed that the cases whic are no are 58% of the samples. Also, the low p-value shows that the model is significantly better than the NIR. Lastly, Kappa is 0.83 which shows that the model is good. -->
+
+## Multiple Logistic Regression
+
+Check multicollinearity:
+
+```{r}
+cor(train_sleep[,c(2,4,6,9,10)])
+```
+
+Daily steps and physical activity level has 0.74 correlation which can cause multicollinearity. But there is only one pair close to 0.8, it does not seem necessary to use PCA at this rate.
+
+```{r}
+glm_model <- glm(Sleep_Disorder ~ ., data = train_sleep, family = binomial)
+
+print(summary(glm_model))
+vif(glm_model)
+```
+
+From the logistic regression we can see that there is a problem since all of the variables are insignificant, even though the median seems good as it is around 0. VIF values can be checked to see which variables are causing the problem and if there is a multicollinearity problem. VIF values above 5 or 10 can be a candidate, in this case variables are greater than 10, there is a multicollinearity problem, lets remove Sleep_Quality and Stress_Level variables and fit again as they have the greatest GVIF^(1/(2*Df)). Also, we have seen from the correlation plot that Daily_Steps and Physical_Activity_Level likely has multicollinearity, thus Daily_Steps is also removed (after many combinations and trial errors).
+
+```{r}
+glm_model2 <- glm(Sleep_Disorder ~ Gender + Age + Occupation + Sleep_Duration + Physical_Activity_Level +
+                        BMI_Category + Heart_Rate + Blood_Pressure_C, data = train_sleep, family = binomial)
+
+print(summary(glm_model2))
+vif(glm_model2)
+```
+
+We can see that the GVIF values have gotten much better, let us remove Occupation as well to see if multicollinearity problem can be solved finally. 
+
+```{r}
+glm_model3 <- glm(Sleep_Disorder ~Gender + Age + Sleep_Duration + Physical_Activity_Level +
+                        BMI_Category + Heart_Rate + Blood_Pressure_C, data = train_sleep, family = binomial)
+
+print(summary(glm_model3))
+vif(glm_model3)
+```
+
+Now, there is no longer multicollinearity problem. We can just keep significant variables in the model at this point to be able to interpret.
+
+```{r}
+glm_model4 <- glm(Sleep_Disorder ~ BMI_Category + Heart_Rate , data = train_sleep, family = binomial)
+
+print(summary(glm_model4))
+vif(glm_model4)
+```
+
+Being overweight compared to normal weight increases log-odds by 4.48, overweight people are 88.5 times more likely to have a sleep disorder than normal weight people assuming all other are equal. One unit increase in heart rate increases 17% increase in odds of having sleep disorders.
+
+Scaling was applied to solve multicollinearity but it did not solve the problem.
+
+<!-- ## Try scaling -->
+
+<!-- ```{r} -->
+<!-- # Or base R alternative: -->
+<!-- scaled_numeric <- as.data.frame(scale(train_sleep[, sapply(train_sleep, is.numeric)])) -->
+<!-- categorical_vars <- train_sleep %>% select(where(is.factor))  # or is.character + mutate_if() -->
+
+<!-- # combine -->
+<!-- scaled_df <- bind_cols(scaled_numeric, categorical_vars) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- glm_scaled <- glm(Sleep_Disorder ~ ., data = scaled_df, family = "binomial") -->
+<!-- summary(glm_scaled) -->
+<!-- vif(glm_scaled) -->
+<!-- ``` -->
+
+<!-- VIF values are still bad. Ridge regression can be applied to neutralize the impacts of multicollinearity. -->
+
+
+<!-- ## Ridge Regression -->
+
+<!-- ###Ridge Logistic Regression Assumpitons -->
+
+<!-- - Linearity of Predictors with the Log-Odds of the Response -->
+
+<!-- ```{r} -->
+<!-- boxTidwell(Sleep_Disorder ~ Age + Sleep_Duration + Physical_Activity_Level + Heart_Rate + Daily_Steps, data = train_sleep) -->
+<!-- ``` -->
+
+
+<!-- Apply ridge regression by one-hot encoding the categorical variables. -->
+
+<!-- ```{r} -->
+<!-- #one-hot encode -->
+<!-- modelx_train <- model.matrix(Sleep_Disorder ~ ., data = train_sleep)[, -1] -->
+<!-- modely_train <- train_sleep$Sleep_Disorder -->
+
+<!-- newx_test <- model.matrix(Sleep_Disorder~ ., data = test_sleep)[, -1] -->
+<!-- newy_test <- test_sleep$Sleep_Disorder -->
+
+<!-- #Ridge with alpha=0 -->
+<!-- ridge_cv <- cv.glmnet( -->
+<!--   modelx_train, modely_train, -->
+<!--   family = "binomial", -->
+<!--   alpha = 0,                     # Ridge  -->
+<!--   type.measure = "deviance",    #classification -->
+<!--   nfold = 10, -->
+<!--   parallel = TRUE -->
+<!-- ) -->
+
+<!-- grid =10^ seq (10,-4, length =100) #dummy vector to try lambdas -->
+
+<!-- model_ridge <- glmnet( -->
+<!--   modelx_train, modely_train, -->
+<!--   family = "binomial", -->
+<!--   alpha = 0, -->
+<!--   lambda = grid -->
+<!--   #lambda = ridge_cv$lambda.1se -->
+<!--   #lambda = ridge_cv$lambda.min #for lowest error -->
+<!-- ) -->
+
+<!-- model_ridge$lambda[30] -->
+<!-- model_ridge$lambda[70] -->
+<!-- coef(model_ridge)[,30]  -->
+<!-- coef(model_ridge)[,70] -->
+
+<!-- plot(ridge_cv) -->
+
+<!-- #best lambda -->
+<!-- best_lambda <- ridge_cv$lambda.min -->
+<!-- best_lambda -->
+<!-- ``` -->
+
+<!-- Before interpreting the ridge regression, hyper parameter tuning to lambda is the best practice. By creating a vector of sequence of dummy values trying different lambdas made possible. When 30th and 70th lambda values are observed it is seen than 30th gives 792482.9 and 40th gives 1.75. When their coefficients are observed it is also seen that coefficients are extremely small for 30th lambda. Hence as lambda increases, ridge regression coefficients will get closer to 0. -->
+<!-- However, the best lambda value can be find by using cross validation. lambda.min function gives the lambda with the lowest possible error which was obtained as 0.0402. From the plot it is also seen that around exp(-2.9) can be chosen which is very close to the 0.04 anyways.  -->
+
+<!-- ```{r} -->
+<!-- model_ridge_best <- glmnet( -->
+<!--   modelx_train, modely_train, -->
+<!--   family = "binomial", -->
+<!--   alpha = 0, -->
+<!--   lambda = ridge_cv$lambda.min #for lowest error -->
+<!-- ) -->
+
+<!-- # Coefficients -->
+<!-- coef(model_ridge_best) -->
+<!-- ``` -->
+
+<!-- Check the coefficients to interpret the model, there are no longer p-values as ridge regression does not check the significance of variables, instead it asks which combination of variables are the most representative. -->
+
+<!-- From the coefficients we can have some interpretations.  -->
+<!-- Being male decreases the odds of having a sleep disorder by 17.3% when all the other variables are constant.  -->
+
+<!-- Each one year increase in age increases the odds of having a sleep disorder by 0.03%.  -->
+
+<!-- While occupations like manager, sales representative, and nurse increases the odds of having a sleep disorder; occupations like scientist, doctor and engineer decreases it.  -->
+
+<!-- For each one unit increase in sleep duration decreases the odds of having sleep disorder by 11%.  -->
+
+<!-- Moderate and very good sleep qualities decreases the odds of having a sleep disorder while good quality increases it a little compared to low sleep quality. -->
+
+<!-- Physical activity level has a little to no positive impact on having a sleep disorder, on EDA part it was seen that more physical activity had more healthy individuals. -->
+
+<!-- In the EDA part it was also observed that as heart rate increases having a sleep disorder may be increasing as well, from the model this was proven as for each one unit increase in heart rate, the odds of having a sleep disorder increases by 10%. -->
+
+<!-- Lastly, while moderate stress level decreases the odds, high stress level increases it by a great amount compared to low stress level. However, there was not seen a great distinction in the bubble plot in EDA part. -->
+
+<!-- ```{r} -->
+<!-- # AUC on test set -->
+<!-- roc_ridge <- roc(newy_test, as.numeric(predict(model_ridge_best, newx_test, type = "response"))) -->
+<!-- area_under_curve <- auc(roc_ridge) -->
+<!-- cat("AUC:", area_under_curve, "\n") -->
+<!-- ``` -->
+
+# Model Performance
+
+```{r}
+predicted_probs_train <- predict(glm_model4, newdata = train_sleep, type = "response")
+actual_train <- ifelse(train_sleep$Sleep_Disorder == "Yes", 1, 0)
+```
+
+```{r}
+predicted_probs_test <- predict(glm_model4, newdata = test_sleep, type = "response")
+actual_test <- ifelse(test_sleep$Sleep_Disorder == "Yes", 1, 0)
+```
+
+```{r}
+roc_glm_train <- roc(actual_train, predicted_probs_train)
+plot(roc_glm_train, col = "blue", lwd = 2, main = "ROC Curve - Train Set")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+roc_glm_test <- roc(actual_test, predicted_probs_test)
+plot(roc_glm_test, col = "blue", lwd = 2, main = "ROC Curve - Test Set")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# Show AUC
+cat("train:",auc(roc_glm_train),
+    "\n", "test:",auc(roc_glm_test))
+```
+
+Area under the curve shows the performance of how good the model can separate the two classes. 0.93 is a really good number. Test gives 0.85 which is also good there does not seem to be a serious overfit but it should be kept in mind.
+
+
+```{r}
+#training set prediction
+train_probabilities1 <- predict(glm_model4, newdata = train_sleep, type = "response")
+train_predictions1 <- factor(ifelse(train_probabilities1 > 0.5, "Yes", "No"), levels = c("No", "Yes"))
+
+#test set prediction
+test_probabilities1 <- predict(glm_model4, newdata = test_sleep, type = "response")
+test_predictions1 <- factor(ifelse(test_probabilities1 > 0.5, "Yes", "No"), levels = c("No", "Yes"))
+
+#actual values
+actual_train1 <- factor(train_sleep$Sleep_Disorder, levels = c("No", "Yes"))
+actual_test1  <- factor(test_sleep$Sleep_Disorder,  levels = c("No", "Yes"))
+
+#Confusion matrices
+train_conf <- confusionMatrix(train_predictions1, actual_train1, positive = "Yes")
+test_conf <- confusionMatrix(test_predictions1, actual_test1, positive = "Yes")
+
+cat("TRAIN PERFORMANCE:\n")
+print(train_conf)
+
+cat("\nTEST PERFORMANCE:\n")
+print(test_conf)
+```
+
+When accuracy of the train set is checked it is seen that 91% of the overall predictions are correct, it is higher compared to the test set which can indicate mild overfitting. Sensitivity, which shows correctly classified true cases is good on both cases, but it is again high on train set. Specificity is the percentage of correctly classified false cases, which is 91% on train and 88% on test set. When no information rate is checked it is observed that the cases which are no are 58% of the samples in both sets. Also, the low p-value shows that the model is significantly better than the NIR. Lastly, Kappa value shows that the model is good, train set is a little higher might show overfitting. 
+
+Generally, confusion matrix results are good on both cases. It should be kept in mind that higher train accuracy might indicate overfitting but it does not seem severe.
+
+<!-- ```{r} -->
+
+<!-- #predictions -->
+<!-- train_preds <- predict(cv_model, s = best_lambda, newx = x_train) -->
+<!-- test_preds <- predict(cv_model, s = best_lambda, newx = x_test) -->
+
+<!-- #performance -->
+<!-- train_rmse <- sqrt(mean((y_train - train_preds)^2)) -->
+<!-- test_rmse <- sqrt(mean((y_test - test_preds)^2)) -->
+
+<!-- train_r2 <- cor(y_train, train_preds)^2 -->
+<!-- test_r2 <- cor(y_test, test_preds)^2 -->
+
+<!-- cat("Train RMSE:", round(train_rmse, 2), "\n") -->
+<!-- cat("Test RMSE:", round(test_rmse, 2), "\n") -->
+<!-- cat("Train R²:", round(train_r2, 2), "\n") -->
+<!-- cat("Test R²:", round(test_r2, 2), "\n") -->
+<!-- ``` -->
+
+
+<!-- ##PCA -->
+
+<!-- ```{r} -->
+<!-- numeric_vars <- sleep_comp %>% -->
+<!--   select(where(is.numeric)) -->
+<!-- pca_result <- prcomp(numeric_vars, scale. = TRUE) -->
+<!-- summary(pca_result) -->
+
+<!-- # Scree plot -->
+<!-- plot(pca_result, type = "l", main = "Scree Plot") -->
+<!-- ``` -->
+
+<!-- Since choosing 3 PCs explains 86% of the variance of the data. -->
+
+<!-- ```{r} -->
+<!-- pca_data <- as.data.frame(pca_result$x[, 1:3])  # first 5 PCs -->
+<!-- pca_data$Sleep_Disorder <- sleep_comp$Sleep_Disorder[rownames(pca_data)] -->
+<!-- model_pca <- glm(Sleep_Disorder ~ ., data = pca_data, family = binomial) -->
+<!-- summary(model_pca) -->
+<!-- ``` -->
+
+<!-- ##One-Hot Encoding for Non-Binary Categorical Variables -->
+
+<!-- All the categorical variables that are not in  -->
+<!-- ```{r} -->
+<!-- encoded_vars <- model.matrix(~ Gender + Occupation + Sleep_Quality + Stress_Level + BMI_Category + Sleep_Disorder + Blood_Pressure_C, data = sleep_comp)[, -1] -->
+<!-- # Combine with other variables -->
+<!-- other_vars <- sleep_comp %>% select(Age, Sleep_Duration, Physical_Activity_Level,Heart_Rate,Daily_Steps) -->
+<!-- sleep_encoded <- cbind(encoded_vars, other_vars) -->
+<!-- ``` -->
+
